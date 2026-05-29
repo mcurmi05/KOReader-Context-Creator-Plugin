@@ -1,3 +1,4 @@
+local ButtonDialog = require("ui/widget/buttondialog")
 local DataStorage = require("datastorage")
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
@@ -23,8 +24,9 @@ local function normalizeWord(word)
     if not word then return "" end
     word = word:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
     word = word:lower()
+    word = word:gsub("\u{2019}", "'")                    --curly apostrophe -> straight (Lua patterns are byte-based, so a multibyte char can't live in a [class])
     word = word:gsub("^[%p]+", ""):gsub("[%p]+$", "")    --trim leading/trailing punctuation
-    word = word:gsub("['\u{2019}]s$", "")                --possessive, straight or curly apostrophe
+    word = word:gsub("'s$", "")                          --possessive 's
     if #word > 3 then word = word:gsub("s$", "") end     --plural/trailing s (only on longer words, so "bus" stays "bus")
     return word
 end
@@ -43,17 +45,6 @@ local BULLET = "\u{2022} "
 --trim leading/trailing whitespace from a string
 local function trim(text)
     return (text or ""):gsub("^%s+", ""):gsub("%s+$", "")
-end
-
---record a highlighted surface form (e.g. "Mustang's") on a context, de-duped case-insensitively
-local function addVariant(entry, surface)
-    surface = trim(surface)
-    if surface == "" then return end
-    local low = surface:lower()
-    for _, v in ipairs(entry.variants) do
-        if v:lower() == low then return end
-    end
-    table.insert(entry.variants, surface)
 end
 
 function ContextCreator:init()
@@ -124,20 +115,7 @@ function ContextCreator:loadContexts()
     f:close()
     if not content or content == "" then return {} end
     local ok, data = pcall(rapidjson.decode, content)
-    if ok and type(data) == "table" then
-        --normalize each entry to { points = {...}, variants = {...} }, upgrading the
-        --old format where the value was just a plain array of dot points
-        for title, entry in pairs(data) do
-            if type(entry) ~= "table" then
-                data[title] = { points = {}, variants = { title } }
-            elseif entry.points == nil then
-                data[title] = { points = entry, variants = { title } } -- old array-only format
-            else
-                entry.variants = entry.variants or { title }
-            end
-        end
-        return data
-    end
+    if ok and type(data) == "table" then return data end
     logger.warn("ContextCreator: could not parse", self:getBookFilePath())
     return {}
 end
@@ -182,22 +160,19 @@ function ContextCreator:showEntryEditor(word)
 
     local contexts = self:loadContexts()
     local key = self:findContextKey(contexts, word) or word
-    local entry = contexts[key]
+    local points = contexts[key]
 
-    --pass the highlighted surface form (word) along so it gets recorded as a variant on save
-    if not entry or #entry.points == 0 then
-        self:editPoint(key, nil, word)
+    if not points or #points == 0 then
+        self:editPoint(key, nil)
     else
-        self:showPointsList(key, word)
+        self:showPointsList(key)
     end
 end
 
---show the dot points for a context as a list, with add/edit/delete
---variant is the surface form just highlighted (if any), carried through to editPoint
-function ContextCreator:showPointsList(key, variant)
+--show the dot points for a context as a list. tap to add/edit, long-press to delete.
+function ContextCreator:showPointsList(key)
     local contexts = self:loadContexts()
-    local entry = contexts[key] or { points = {}, variants = {} }
-    local points = entry.points
+    local points = contexts[key] or {}
 
     local items = {{
         text = _("\u{FF0B} Add dot point"),
@@ -218,7 +193,13 @@ function ContextCreator:showPointsList(key, variant)
         height = Screen:getHeight(),
         onMenuSelect = function(_self, item)
             UIManager:close(menu)
-            self:editPoint(key, item._index, variant) -- _index is nil for the "Add dot point" row
+            self:editPoint(key, item._index) -- _index is nil for the "Add dot point" row
+        end,
+        onMenuHold = function(_self, item)
+            if item._index then -- ignore a hold on the "Add dot point" row
+                self:showPointActions(menu, key, item._index)
+            end
+            return true
         end,
         close_callback = function()
             UIManager:close(menu)
@@ -227,66 +208,54 @@ function ContextCreator:showPointsList(key, variant)
     UIManager:show(menu)
 end
 
+--long-press a dot point, offer to delete it
+function ContextCreator:showPointActions(menu, key, index)
+    local dialog
+    dialog = ButtonDialog:new{
+        title = _("Delete this dot point?"),
+        title_align = "center",
+        buttons = {
+            {{
+                text = _("Delete"),
+                callback = function()
+                    UIManager:close(dialog)
+                    local contexts = self:loadContexts()
+                    local points = contexts[key]
+                    if points then
+                        table.remove(points, index)
+                        if #points == 0 then contexts[key] = nil end
+                        self:saveContexts(contexts)
+                    end
+                    UIManager:close(menu)
+                    self:returnToList(key)
+                end,
+            }},
+            {{
+                text = _("Cancel"),
+                callback = function() UIManager:close(dialog) end,
+            }},
+        },
+    }
+    UIManager:show(dialog)
+end
+
 --edit a single dot point, index == nil means we are adding a new one
 --newlines stay inside the one point, a new point is only made via "Add dot point".
---variant is the highlighted surface form to record on this context when something is saved
-function ContextCreator:editPoint(key, index, variant)
+function ContextCreator:editPoint(key, index)
     local contexts = self:loadContexts()
-    local entry = contexts[key] or { points = {}, variants = {} }
-    local points = entry.points
+    local points = contexts[key] or {}
     local existing = index and points[index] or ""
 
     local function persist()
         if #points == 0 then
             contexts[key] = nil -- no points left -> drop the context entirely
         else
-            entry.points = points
-            contexts[key] = entry
+            contexts[key] = points
         end
         self:saveContexts(contexts)
     end
 
     local dialog
-    local row = {
-        {
-            text = _("Cancel"),
-            id = "close",
-            callback = function()
-                UIManager:close(dialog)
-                self:returnToList(key, variant)
-            end,
-        },
-    }
-    if index then
-        table.insert(row, {
-            text = _("Delete"),
-            callback = function()
-                table.remove(points, index)
-                persist()
-                UIManager:close(dialog)
-                self:returnToList(key, variant)
-            end,
-        })
-    end
-    table.insert(row, {
-        text = index and _("Save") or _("Add dot point"),
-        callback = function()
-            local text = trim(dialog:getInputText())
-            if text == "" then
-                if index then table.remove(points, index) end -- emptied -> delete it
-            elseif index then
-                points[index] = text
-                addVariant(entry, variant) -- the highlighted form matched this context
-            else
-                table.insert(points, text)
-                addVariant(entry, variant)
-            end
-            persist()
-            UIManager:close(dialog)
-            self:returnToList(key, variant)
-        end,
-    })
-
     dialog = InputDialog:new{
         title = index and T(_("Edit dot point \u{2014} %1"), key) or T(_("New dot point \u{2014} %1"), key),
         input = existing,
@@ -294,18 +263,43 @@ function ContextCreator:editPoint(key, index, variant)
         description = _("Use as many lines as you like \u{2014} this stays one dot point."),
         allow_newline = true, --enter inserts a newline, tap a button to commit
         text_height = Screen:scaleBySize(180),
-        buttons = {row},
+        buttons = {{
+            {
+                text = _("Cancel"),
+                id = "close",
+                callback = function()
+                    UIManager:close(dialog)
+                    self:returnToList(key)
+                end,
+            },
+            {
+                text = index and _("Save") or _("Add dot point"),
+                callback = function()
+                    local text = trim(dialog:getInputText())
+                    if text == "" then
+                        if index then table.remove(points, index) end -- emptied -> delete it
+                    elseif index then
+                        points[index] = text
+                    else
+                        table.insert(points, text)
+                    end
+                    persist()
+                    UIManager:close(dialog)
+                    self:returnToList(key)
+                end,
+            },
+        }},
     }
     UIManager:show(dialog)
     dialog:onShowKeyboard()
 end
 
 --after editing, reopen the list if anything remains, otherwise return to reading
-function ContextCreator:returnToList(key, variant)
+function ContextCreator:returnToList(key)
     local contexts = self:loadContexts()
-    local entry = contexts[key]
-    if entry and #entry.points > 0 then
-        self:showPointsList(key, variant)
+    local points = contexts[key]
+    if points and #points > 0 then
+        self:showPointsList(key)
     end
 end
 
@@ -315,11 +309,9 @@ end
 function ContextCreator:showAllContexts()
     local contexts = self:loadContexts()
     local items = {}
-    for title, entry in pairs(contexts) do
-        --show every highlighted word that matched this context, e.g. "Mustang, Mustang's"
-        local label = #entry.variants > 0 and table.concat(entry.variants, ", ") or title
+    for title, points in pairs(contexts) do
         table.insert(items, {
-            text = T("%1  (%2)", label, #entry.points),
+            text = T("%1  (%2)", title, #points),
             _title = title,
         })
     end
@@ -343,11 +335,93 @@ function ContextCreator:showAllContexts()
             UIManager:close(menu)
             self:showEntryEditor(item._title)
         end,
+        onMenuHold = function(_self, item)
+            self:showContextActions(menu, item._title)
+            return true
+        end,
         close_callback = function()
             UIManager:close(menu)
         end,
     }
     UIManager:show(menu)
+end
+
+--long press a context, rename it or delete it
+function ContextCreator:showContextActions(menu, title)
+    local dialog
+    dialog = ButtonDialog:new{
+        title = title,
+        title_align = "center",
+        buttons = {
+            {{
+                text = _("Edit name"),
+                callback = function()
+                    UIManager:close(dialog)
+                    self:renameContext(menu, title)
+                end,
+            }},
+            {{
+                text = _("Delete"),
+                callback = function()
+                    UIManager:close(dialog)
+                    local contexts = self:loadContexts()
+                    contexts[title] = nil
+                    self:saveContexts(contexts)
+                    UIManager:close(menu)
+                    self:showAllContexts()
+                end,
+            }},
+            {{
+                text = _("Cancel"),
+                callback = function() UIManager:close(dialog) end,
+            }},
+        },
+    }
+    UIManager:show(dialog)
+end
+
+--rename a context, if the new name matches an existing context, merge their points
+function ContextCreator:renameContext(menu, title)
+    local dialog
+    dialog = InputDialog:new{
+        title = _("Rename context"),
+        input = title,
+        buttons = {{
+            {
+                text = _("Cancel"),
+                id = "close",
+                callback = function() UIManager:close(dialog) end,
+            },
+            {
+                text = _("Save"),
+                is_enter_default = true,
+                callback = function()
+                    local new_name = trim(dialog:getInputText())
+                    UIManager:close(dialog)
+                    if new_name == "" or new_name == title then return end
+
+                    local contexts = self:loadContexts()
+                    local points = contexts[title]
+                    if points then
+                        contexts[title] = nil
+                        local existing = self:findContextKey(contexts, new_name)
+                        if existing then -- a different context already covers this name: merge in
+                            for _, p in ipairs(points) do
+                                table.insert(contexts[existing], p)
+                            end
+                        else
+                            contexts[new_name] = points
+                        end
+                        self:saveContexts(contexts)
+                    end
+                    UIManager:close(menu)
+                    self:showAllContexts()
+                end,
+            },
+        }},
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
 end
 
 --reader menu entry
