@@ -12,4 +12,4 @@ The idea:
 
 Will be first time writing Lua, have a little bit of experience with Koreader plugins and wanted to make my own.
 
-Testing using a MAC build of Koreader and pasting the plugin into the plugins folder.
+Testing using a MAC build of Koreader and pasting the plugin into the plugins folder (which is extremely buggy).

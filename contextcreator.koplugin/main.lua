@@ -36,16 +36,12 @@ local function sanitizeFilename(name)
     return name
 end
 
----split a multi line editor blob into a list of dot points (one per line).
-local function linesToPoints(text)
-    local points = {}
-    for line in ((text or "") .. "\n"):gmatch("(.-)\n") do
-        line = line:gsub("^%s+", ""):gsub("%s+$", "")
-        if line ~= "" then
-            table.insert(points, line)
-        end
-    end
-    return points
+--bullet shown in front of each dot point in the list view
+local BULLET = "\u{2022} "
+
+--trim leading/trailing whitespace from a string
+local function trim(text)
+    return (text or ""):gsub("^%s+", ""):gsub("%s+$", "")
 end
 
 function ContextCreator:init()
@@ -145,6 +141,8 @@ end
 
 --editing
 
+--resolve the word to a context, then show its dot points
+--a brand new context has nothing to show, so jump straight to adding a point
 function ContextCreator:showEntryEditor(word)
     if normalizeWord(word) == "" then return end
 
@@ -152,39 +150,120 @@ function ContextCreator:showEntryEditor(word)
     local key = self:findContextKey(contexts, word) or word
     local points = contexts[key] or {}
 
-    local dialog
-    dialog = InputDialog:new{
+    if #points == 0 then
+        self:editPoint(key, nil)
+    else
+        self:showPointsList(key)
+    end
+end
+
+--show the dot points for a context as a list, with add/edit/delete
+function ContextCreator:showPointsList(key)
+    local contexts = self:loadContexts()
+    local points = contexts[key] or {}
+
+    local items = {{
+        text = _("\u{FF0B} Add dot point"),
+        _add = true,
+    }}
+    for i, point in ipairs(points) do
+        table.insert(items, {
+            text = BULLET .. point:gsub("%s*\n%s*", " "), --collapse multi line points to one line for the list
+            _index = i,
+        })
+    end
+
+    local menu
+    menu = Menu:new{
         title = T(_("Context: %1"), key),
-        input = table.concat(points, "\n"),
-        input_hint = _("One dot point per line..."),
-        description = _("Each line becomes a separate dot point."),
-        allow_newline = true,
+        item_table = items,
+        width = Screen:getWidth(),
+        height = Screen:getHeight(),
+        onMenuSelect = function(_self, item)
+            UIManager:close(menu)
+            self:editPoint(key, item._index) -- _index is nil for the "Add dot point" row
+        end,
+        close_callback = function()
+            UIManager:close(menu)
+        end,
+    }
+    UIManager:show(menu)
+end
+
+--edit a single dot point, index == nil means we are adding a new one
+--newlines stay inside the one point, a new point is only made via "Add dot point".
+function ContextCreator:editPoint(key, index)
+    local contexts = self:loadContexts()
+    local points = contexts[key] or {}
+    local existing = index and points[index] or ""
+
+    local function persist()
+        if #points == 0 then
+            contexts[key] = nil -- no points left -> drop the context entirely
+        else
+            contexts[key] = points
+        end
+        self:saveContexts(contexts)
+    end
+
+    local dialog
+    local row = {
+        {
+            text = _("Cancel"),
+            id = "close",
+            callback = function()
+                UIManager:close(dialog)
+                self:returnToList(key)
+            end,
+        },
+    }
+    if index then
+        table.insert(row, {
+            text = _("Delete"),
+            callback = function()
+                table.remove(points, index)
+                persist()
+                UIManager:close(dialog)
+                self:returnToList(key)
+            end,
+        })
+    end
+    table.insert(row, {
+        text = index and _("Save") or _("Add dot point"),
+        callback = function()
+            local text = trim(dialog:getInputText())
+            if text == "" then
+                if index then table.remove(points, index) end -- emptied -> delete it
+            elseif index then
+                points[index] = text
+            else
+                table.insert(points, text)
+            end
+            persist()
+            UIManager:close(dialog)
+            self:returnToList(key)
+        end,
+    })
+
+    dialog = InputDialog:new{
+        title = index and T(_("Edit dot point \u{2014} %1"), key) or T(_("New dot point \u{2014} %1"), key),
+        input = existing,
+        input_hint = _("Type your dot point..."),
+        description = _("Use as many lines as you like \u{2014} this stays one dot point."),
+        allow_newline = true, --enter inserts a newline, tap a button to commit
         text_height = Screen:scaleBySize(180),
-        buttons = {{
-            {
-                text = _("Cancel"),
-                id = "close",
-                callback = function() UIManager:close(dialog) end,
-            },
-            {
-                text = _("Save"),
-                is_enter_default = true,
-                callback = function()
-                    local new_points = linesToPoints(dialog:getInputText())
-                    if #new_points == 0 then
-                        contexts[key] = nil -- emptied -> delete this context
-                    else
-                        contexts[key] = new_points
-                    end
-                    self:saveContexts(contexts)
-                    UIManager:close(dialog)
-                    logger.dbg("ContextCreator: saved", key, "with", #new_points, "points")
-                end,
-            },
-        }},
+        buttons = {row},
     }
     UIManager:show(dialog)
     dialog:onShowKeyboard()
+end
+
+--after editing, reopen the list if anything remains, otherwise return to reading
+function ContextCreator:returnToList(key)
+    local contexts = self:loadContexts()
+    if contexts[key] and #contexts[key] > 0 then
+        self:showPointsList(key)
+    end
 end
 
 
