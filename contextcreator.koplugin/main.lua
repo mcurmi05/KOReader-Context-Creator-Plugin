@@ -47,6 +47,39 @@ local function trim(text)
     return (text or ""):gsub("^%s+", ""):gsub("%s+$", "")
 end
 
+--how alike two contexts must be (0..1) before we suggest merging instead of creating new
+local SIMILARITY_THRESHOLD = 0.7
+
+--Levenshtein edit distance between two strings (byte-wise, fine for our short names)
+local function levenshtein(a, b)
+    local la, lb = #a, #b
+    if la == 0 then return lb end
+    if lb == 0 then return la end
+    local prev = {}
+    for j = 0, lb do prev[j] = j end
+    for i = 1, la do
+        local cur = { [0] = i }
+        local ca = a:byte(i)
+        for j = 1, lb do
+            local cost = (ca == b:byte(j)) and 0 or 1
+            cur[j] = math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+        end
+        prev = cur
+    end
+    return prev[lb]
+end
+
+--similarity of two already-normalized words, 0 (nothing alike) to 1 (identical)
+--containment (e.g. "jon" inside "jon snow") counts as a strong match
+local function similarity(a, b)
+    if a == "" or b == "" then return 0 end
+    if a == b then return 1 end
+    if #a >= 3 and #b >= 3 and (a:find(b, 1, true) or b:find(a, 1, true)) then
+        return 0.9
+    end
+    return 1 - levenshtein(a, b) / math.max(#a, #b)
+end
+
 function ContextCreator:init()
     self.ui.menu:registerToMainMenu(self)
 
@@ -153,20 +186,83 @@ end
 
 --editing
 
---resolve the word to a context, then show its dot points
---a brand new context has nothing to show, so jump straight to adding a point
-function ContextCreator:showEntryEditor(word)
-    if normalizeWord(word) == "" then return end
-
+--open a context: show its dot points, or jump straight to adding one if it is empty/new
+function ContextCreator:openContext(key)
     local contexts = self:loadContexts()
-    local key = self:findContextKey(contexts, word) or word
     local points = contexts[key]
-
     if not points or #points == 0 then
         self:editPoint(key, nil)
     else
         self:showPointsList(key)
     end
+end
+
+--existing contexts that are similar (but not an exact match) to the word, best first
+function ContextCreator:findSimilarContexts(contexts, word)
+    local norm = normalizeWord(word)
+    local matches = {}
+    for title in pairs(contexts) do
+        local score = similarity(norm, normalizeWord(title))
+        if score >= SIMILARITY_THRESHOLD then
+            table.insert(matches, { title = title, score = score })
+        end
+    end
+    table.sort(matches, function(a, b) return a.score > b.score end)
+    return matches
+end
+
+--resolve the word to a context, then show its dot points
+--an exact (normalized) match opens straight away, otherwise, if similar contexts exist,
+--ask whether to add to one of them before creating a brand new context.
+function ContextCreator:showEntryEditor(word)
+    if normalizeWord(word) == "" then return end
+
+    local contexts = self:loadContexts()
+    local key = self:findContextKey(contexts, word)
+    if key then
+        self:openContext(key)
+        return
+    end
+
+    local similar = self:findSimilarContexts(contexts, word)
+    if #similar > 0 then
+        self:showSimilarChooser(word, similar)
+    else
+        self:openContext(word) -- brand new context named after the word
+    end
+end
+
+--ask the user whether the word belongs to one of the similar existing contexts
+function ContextCreator:showSimilarChooser(word, similar)
+    local dialog
+    local buttons = {}
+    for _, m in ipairs(similar) do
+        table.insert(buttons, {{
+            text = T(_("Add to \u{201C}%1\u{201D}"), m.title),
+            callback = function()
+                UIManager:close(dialog)
+                self:openContext(m.title)
+            end,
+        }})
+    end
+    table.insert(buttons, {{
+        text = T(_("No, create \u{201C}%1\u{201D}"), word),
+        callback = function()
+            UIManager:close(dialog)
+            self:openContext(word)
+        end,
+    }})
+    table.insert(buttons, {{
+        text = _("Cancel"),
+        callback = function() UIManager:close(dialog) end,
+    }})
+
+    dialog = ButtonDialog:new{
+        title = T(_("\u{201C}%1\u{201D} looks similar to existing contexts. Add to one of them?"), word),
+        title_align = "center",
+        buttons = buttons,
+    }
+    UIManager:show(dialog)
 end
 
 --show the dot points for a context as a list. tap to add/edit, long-press to delete.
