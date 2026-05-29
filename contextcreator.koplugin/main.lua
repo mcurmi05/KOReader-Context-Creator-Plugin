@@ -47,7 +47,7 @@ end
 function ContextCreator:init()
     self.ui.menu:registerToMainMenu(self)
 
-    --add a button to the long press/highlight popup
+    --add buttons to the long press/highlight popup
     if self.ui.highlight then
         self.ui.highlight:addToHighlightDialog("13_contextcreator", function(this)
             return {
@@ -58,6 +58,15 @@ function ContextCreator:init()
                     if word and word ~= "" then
                         self:showEntryEditor(word)
                     end
+                end,
+            }
+        end)
+        self.ui.highlight:addToHighlightDialog("14_contextcreator_view", function(this)
+            return {
+                text = _("View all contexts"),
+                callback = function()
+                    this:onClose()
+                    self:showAllContexts()
                 end,
             }
         end)
