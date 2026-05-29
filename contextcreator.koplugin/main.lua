@@ -72,7 +72,11 @@ end
 --storage, chose to have a json file per book
 
 function ContextCreator:getStoreDir()
-    local dir = DataStorage:getDataDir() .. "/contextcreator"
+    --start from KOReader's home folder, fall back to the data dir if none is set
+    local home = G_reader_settings:readSetting("home_dir") or DataStorage:getDataDir()
+    --go one directory out of the home folder, then keep our files in a "contextcreator" folder there
+    local parent = util.splitFilePathName((home:gsub("/+$", "")))
+    local dir = parent:gsub("/+$", "") .. "/contextcreator"
     util.makePath(dir)
     return dir
 end
