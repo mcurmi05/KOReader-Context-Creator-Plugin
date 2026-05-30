@@ -1,9 +1,12 @@
+local Button = require("ui/widget/button")
 local ButtonDialog = require("ui/widget/buttondialog")
 local DataStorage = require("datastorage")
 local Dispatcher = require("dispatcher")
+local HorizontalSpan = require("ui/widget/horizontalspan")
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local Menu = require("ui/widget/menu")
+local Size = require("ui/size")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local Screen = require("device").screen
@@ -279,18 +282,33 @@ function ContextCreator:showSimilarChooser(word, similar)
     UIManager:show(dialog)
 end
 
+--insert a borderless text button next to a Menu's bottom page-navigation bar.
+--side == "left" puts it before the chevrons, "right" puts it after them.
+--(menu.page_info is the HorizontalGroup holding the page-turn chevrons and "Page x of y")
+function ContextCreator:addFooterButton(menu, side, text, callback)
+    local button = Button:new{
+        text = text,
+        bordersize = 0,
+        show_parent = menu,
+        callback = callback,
+    }
+    local span = HorizontalSpan:new{ width = Size.span.horizontal_default }
+    if side == "left" then
+        table.insert(menu.page_info, 1, span)
+        table.insert(menu.page_info, 1, button)
+    else
+        table.insert(menu.page_info, span)
+        table.insert(menu.page_info, button)
+    end
+    menu.page_info:resetLayout() --recompute positions/size so the bar re-centers with the new buttons
+end
+
 --show the dot points for a context as a list. tap to add/edit, long-press to delete.
 function ContextCreator:showPointsList(key)
     local contexts = self:loadContexts()
     local points = contexts[key] or {}
 
-    local items = {{
-        text = _("\u{2190} All contexts"),
-        _back = true,
-    }, {
-        text = _("\u{FF0B} Add dot point"),
-        _add = true,
-    }}
+    local items = {}
     for i, point in ipairs(points) do
         table.insert(items, {
             text = BULLET .. point:gsub("%s*\n%s*", " "), --collapse multi line points to one line for the list
@@ -307,22 +325,27 @@ function ContextCreator:showPointsList(key)
         is_popout = false, --keep the border but drop Menus rounded corners
         onMenuSelect = function(_self, item)
             UIManager:close(menu)
-            if item._back then
-                self:showAllContexts()
-            else
-                self:editPoint(key, item._index) -- _index is nil for the "Add dot point" row
-            end
+            self:editPoint(key, item._index)
         end,
         onMenuHold = function(_self, item)
-            if item._index then -- ignore a hold on the "Add dot point" row
-                self:showPointActions(menu, key, item._index)
-            end
+            self:showPointActions(menu, key, item._index)
             return true
         end,
         close_callback = function()
             UIManager:close(menu)
         end,
     }
+
+    --flank the bottom page-navigation bar: "All contexts" on its left, "Add dot point" on its right
+    self:addFooterButton(menu, "left", _("\u{2190} All contexts"), function()
+        UIManager:close(menu)
+        self:showAllContexts()
+    end)
+    self:addFooterButton(menu, "right", _("\u{FF0B} Add dot point"), function()
+        UIManager:close(menu)
+        self:editPoint(key, nil)
+    end)
+
     UIManager:show(menu, nil, nil, WINDOW_MARGIN, WINDOW_MARGIN)
 end
 
