@@ -42,6 +42,9 @@ end
 --bullet shown in front of each dot point in the list view
 local BULLET = "\u{2022} "
 
+--margin kept around the context windows so the book stays visible behind them
+local WINDOW_MARGIN = Screen:scaleBySize(40)
+
 --trim leading/trailing whitespace from a string
 local function trim(text)
     return (text or ""):gsub("^%s+", ""):gsub("%s+$", "")
@@ -284,8 +287,9 @@ function ContextCreator:showPointsList(key)
     menu = Menu:new{
         title = T(_("Context: %1"), key),
         item_table = items,
-        width = Screen:getWidth(),
-        height = Screen:getHeight(),
+        width = Screen:getWidth() - 2 * WINDOW_MARGIN,
+        height = Screen:getHeight() - 2 * WINDOW_MARGIN,
+        is_popout = false, --keep the border but drop Menus rounded corners
         onMenuSelect = function(_self, item)
             UIManager:close(menu)
             self:editPoint(key, item._index) -- _index is nil for the "Add dot point" row
@@ -300,7 +304,7 @@ function ContextCreator:showPointsList(key)
             UIManager:close(menu)
         end,
     }
-    UIManager:show(menu)
+    UIManager:show(menu, nil, nil, WINDOW_MARGIN, WINDOW_MARGIN)
 end
 
 --long-press a dot point, offer to delete it
@@ -424,8 +428,9 @@ function ContextCreator:showAllContexts()
     menu = Menu:new{
         title = T(_("Contexts: %1"), self:getBookTitle()),
         item_table = items,
-        width = Screen:getWidth(),
-        height = Screen:getHeight(),
+        width = Screen:getWidth() - 2 * WINDOW_MARGIN,
+        height = Screen:getHeight() - 2 * WINDOW_MARGIN,
+        is_popout = false, --keep the border but drop Menus rounded corners
         onMenuSelect = function(_self, item)
             UIManager:close(menu)
             self:showEntryEditor(item._title)
@@ -438,7 +443,7 @@ function ContextCreator:showAllContexts()
             UIManager:close(menu)
         end,
     }
-    UIManager:show(menu)
+    UIManager:show(menu, nil, nil, WINDOW_MARGIN, WINDOW_MARGIN)
 end
 
 --long press a context, rename it or delete it
@@ -524,7 +529,7 @@ end
 function ContextCreator:addToMainMenu(menu_items)
     menu_items.contextcreator = {
         text = _("Context Creator"),
-        sorting_hint = "tools",
+        sorting_hint = "navi", --first/navigation tab
         callback = function() self:showAllContexts() end,
     }
 end
