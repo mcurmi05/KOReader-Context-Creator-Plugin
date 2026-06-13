@@ -12,6 +12,14 @@ The idea:
 
 Will be first time writing Lua, have a little bit of experience with Koreader plugins and wanted to make my own.
 
-Testing using a MAC build of Koreader and pasting the plugin into the plugins folder (which is extremely buggy).
+## Dev setup (mac)
+
+The plugin is symlinked into KOReader's user plugin dir so edits are live, no copying:
+
+```sh
+ln -sfn "$PWD/contextcreator.koplugin" "$HOME/Library/Application Support/koreader/plugins/contextcreator.koplugin"
+```
+
+Then run `./dev.sh` from the repo root to launch the installed `/Applications/KOReader.app` from the terminal so plugin logs and crashes print to stdout. Edit the repo, quit KOReader, re-run `./dev.sh` to reload (plugins only load at startup). Use `KO_DEBUG=1 ./dev.sh` for verbose logging, or `./dev.sh path/to/book.epub` to open straight into a book.
 
 Another idea: Make the json file for a book importable to a web app for the graph idea? Sounds cool for people who like character maps, especially for when the relationships between contexts feature gets added
