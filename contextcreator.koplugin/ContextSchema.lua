@@ -103,32 +103,12 @@ function ContextSchema.titleForKey(doc, key)
     return (node and node.title) or key
 end
 
---does any relationship still reference this node?
-function ContextSchema.nodeHasRelationships(doc, key)
-    for _, rel in ipairs(doc.relationships) do
-        if rel.from == key or rel.to == key then return true end
-    end
-    return false
-end
-
 --find a relationship (and its array index) by id
 function ContextSchema.findRel(doc, id)
     for i, rel in ipairs(doc.relationships) do
         if rel.id == id then return rel, i end
     end
     return nil
-end
-
---drop a node only when it carries nothing worth keeping: no points, no type, no relationships.
---this preserves the old "an empty context disappears" feel while keeping typed/linked nodes around.
---records a tombstone so the deletion survives a future sync.
-function ContextSchema.pruneNodeIfEmpty(doc, key)
-    local node = doc.nodes[key]
-    if node and #node.points == 0 and (node.type == nil or node.type == "unset")
-        and not ContextSchema.nodeHasRelationships(doc, key) then
-        doc.nodes[key] = nil
-        doc.tombstones.nodes[key] = ContextSchema.now()
-    end
 end
 
 --remove a node and every relationship that touches it, recording tombstones so the deletes

@@ -81,7 +81,7 @@ function ContextView:showEntryEditor(word)
     if #similar > 0 then
         self:showSimilarChooser(word, similar)
     else
-        self:openContext(key, ContextText.trim(word)) -- brand new node, titled after the word
+        self:createNewContext(ContextText.trim(word)) -- brand new, run the name -> type -> point setup
     end
 end
 
@@ -95,7 +95,7 @@ function ContextView:showSimilarChooser(word, similar)
             text = T(_("Add to \u{201C}%1\u{201D}"), m.title),
             callback = function()
                 UIManager:close(dialog)
-                self:openContext(m.key)
+                self:editPoint(m.key, m.title, nil) -- existing context, jump straight to a new dot point
             end,
         }})
     end
@@ -103,7 +103,7 @@ function ContextView:showSimilarChooser(word, similar)
         text = T(_("No, create \u{201C}%1\u{201D}"), ContextText.trim(word)),
         callback = function()
             UIManager:close(dialog)
-            self:openContext(ContextText.normalizeWord(word), ContextText.trim(word))
+            self:createNewContext(ContextText.trim(word))
         end,
     }})
     table.insert(buttons, {{
@@ -113,6 +113,130 @@ function ContextView:showSimilarChooser(word, similar)
 
     dialog = ButtonDialog:new{
         title = T(_("\u{201C}%1\u{201D} looks similar to existing contexts. Add to one of them?"), ContextText.trim(word)),
+        title_align = "center",
+        buttons = buttons,
+    }
+    UIManager:show(dialog)
+end
+
+--brand new context setup, step 1: confirm/edit the name (prefilled from the highlighted word)
+function ContextView:createNewContext(name)
+    --do we already have any contexts? if so we can offer to pick one instead of making a new one
+    local has_existing = next(self.store:load().nodes) ~= nil
+
+    local dialog
+    local rows = {{
+        {
+            text = _("Cancel"),
+            id = "close",
+            callback = function() UIManager:close(dialog) end,
+        },
+        {
+            text = _("Next"),
+            is_enter_default = true,
+            callback = function()
+                local title = ContextText.trim(dialog:getInputText())
+                UIManager:close(dialog)
+                if title == "" then return end
+                local key = ContextText.normalizeWord(title)
+                if key == "" then return end
+                --if the typed name lands on a context that already exists, add a point to that one
+                local doc = self.store:load()
+                local existing = doc.nodes[key]
+                if existing then
+                    self:editPoint(key, existing.title, nil)
+                else
+                    self:chooseTypeForNewContext(key, title)
+                end
+            end,
+        },
+    }}
+    --escape hatch: maybe this really is a context we already made but the matcher didnt catch it.
+    --let the user pick it from the list instead (only worth showing once some contexts exist)
+    if has_existing then
+        table.insert(rows, {{
+            text = _("Select existing context instead"),
+            callback = function()
+                UIManager:close(dialog)
+                self:showExistingContextPicker()
+            end,
+        }})
+    end
+
+    dialog = InputDialog:new{
+        title = _("New context"),
+        input = name or "",
+        input_hint = _("Context name"),
+        buttons = rows,
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+--pick from the contexts already in this book, then jump straight to a new dot point for it
+function ContextView:showExistingContextPicker()
+    local doc = self.store:load()
+    local items = {}
+    for key, node in pairs(doc.nodes) do
+        local label = ContextSchema.typeLabel(node.type)
+        local text = label ~= "" and T("%1  \u{00B7} %2", node.title, label) or node.title
+        table.insert(items, { text = text, _key = key, _title = node.title })
+    end
+
+    if #items == 0 then
+        UIManager:show(InfoMessage:new{ text = _("No contexts in this book yet.") })
+        return
+    end
+
+    table.sort(items, function(a, b) return a._title:lower() < b._title:lower() end)
+
+    local menu
+    menu = Menu:new{
+        title = _("Pick an existing context"),
+        item_table = items,
+        width = Screen:getWidth() - 2 * WINDOW_MARGIN,
+        height = Screen:getHeight() - 2 * WINDOW_MARGIN,
+        is_popout = false,
+        onMenuSelect = function(_self, item)
+            UIManager:close(menu)
+            self:editPoint(item._key, item._title, nil)
+        end,
+        close_callback = function() UIManager:close(menu) end,
+    }
+    UIManager:show(menu, nil, nil, WINDOW_MARGIN, WINDOW_MARGIN)
+end
+
+--brand new context setup, step 2: pick a type, then drop into the first dot point
+function ContextView:chooseTypeForNewContext(key, title)
+    local dialog
+    local buttons = {}
+    for i = 1, #ContextSchema.NODE_TYPES do
+        local t = ContextSchema.NODE_TYPES[i]
+        table.insert(buttons, {{
+            text = t == "unset" and _("Skip for now") or ContextSchema.typeLabel(t),
+            callback = function()
+                UIManager:close(dialog)
+                --save the typed node up front so it sticks even before a point is added.
+                --an unset node is left unsaved, it gets created when the first point lands
+                --(and stays prune-able if the user backs out without adding anything)
+                if t ~= "unset" then
+                    local doc = self.store:load()
+                    if not doc.nodes[key] then
+                        doc.nodes[key] = { title = title, type = t, points = {}, updated = ContextSchema.now() }
+                        self.store:save(doc)
+                    end
+                end
+                self:editPoint(key, title, nil, true) -- allow "Skip for now" on the first point
+            end,
+        }})
+    end
+    table.insert(buttons, {{
+        text = _("Cancel"),
+        callback = function() UIManager:close(dialog) end,
+    }})
+
+    dialog = ButtonDialog:new{
+        title = T(_("What kind of thing is \u{201C}%1\u{201D}?"), title),
         title_align = "center",
         buttons = buttons,
     }
@@ -180,7 +304,7 @@ function ContextView:showPointsList(key)
     }
 
     --flank the bottom page-navigation bar: "All contexts" on its left, "Add dot point" on its right
-    self:addFooterButton(menu, "left", _("\u{2190} All contexts"), function()
+    self:addFooterButton(menu, "left", T(_("\u{2190} All contexts for %1"), self.store:getBookTitle()), function()
         UIManager:close(menu)
         self:showAllContexts()
     end)
@@ -208,7 +332,6 @@ function ContextView:showPointActions(menu, key, index)
                     if node then
                         table.remove(node.points, index)
                         node.updated = ContextSchema.now()
-                        ContextSchema.pruneNodeIfEmpty(doc, key)
                         self.store:save(doc)
                     end
                     UIManager:close(menu)
@@ -226,32 +349,76 @@ end
 
 --edit a single dot point, index == nil means we are adding a new one.
 --title is the nodes display name, needed when the node does not exist on disk yet.
+--allow_skip adds a "Skip for now" button (only used while creating a brand new context) so the
+--user can initialise the context without writing a point yet.
 --newlines stay inside the one point, a new point is only made via "Add dot point".
-function ContextView:editPoint(key, title, index)
+function ContextView:editPoint(key, title, index, allow_skip)
     local doc = self.store:load()
     local node = doc.nodes[key]
     local points = node and node.points or {}
     title = (node and node.title) or title or key
     local existing = index and points[index] or ""
 
+    --create the node on disk if it isnt there yet, with the given type (defaults to unset)
+    local function ensureNode(node_type)
+        if not node then
+            node = { title = title, type = node_type or "unset", points = points, updated = ContextSchema.now() }
+            doc.nodes[key] = node
+        end
+        return node
+    end
+
     local function persist()
         if #points > 0 then
-            if not node then
-                node = { title = title, type = "unset", points = points, updated = ContextSchema.now() }
-                doc.nodes[key] = node
-            else
-                node.points = points
-            end
+            ensureNode()
+            node.points = points
             node.updated = ContextSchema.now()
             doc.tombstones.nodes[key] = nil -- it's alive again, clear any stale deletion mark
         elseif node then
-            node.updated = ContextSchema.now()
+            node.updated = ContextSchema.now() -- emptied an existing context, it stays around now
         end
-        ContextSchema.pruneNodeIfEmpty(doc, key) -- a now-empty, untyped, unlinked node disappears
         self.store:save(doc)
     end
 
     local dialog
+    local rows = {{
+        {
+            text = _("Cancel"),
+            id = "close",
+            callback = function()
+                UIManager:close(dialog)
+                self:returnToList(key)
+            end,
+        },
+        {
+            text = index and _("Save") or _("Add dot point"),
+            callback = function()
+                local text = ContextText.trim(dialog:getInputText())
+                if text == "" then
+                    if index then table.remove(points, index) end -- emptied -> delete it
+                elseif index then
+                    points[index] = text
+                else
+                    table.insert(points, text)
+                end
+                persist()
+                UIManager:close(dialog)
+                self:returnToList(key)
+            end,
+        },
+    }}
+    --while creating a brand new context, let the user set it up without a point yet
+    if index == nil and allow_skip then
+        table.insert(rows, {{
+            text = _("Skip for now"),
+            callback = function()
+                ensureNode()        -- keep the freshly created context even with no points
+                self.store:save(doc)
+                UIManager:close(dialog)
+            end,
+        }})
+    end
+
     dialog = InputDialog:new{
         title = index and T(_("Edit dot point for \u{201C}%1\u{201D} context"), title) or T(_("New dot point for \u{201C}%1\u{201D} context"), title),
         input = existing,
@@ -259,32 +426,7 @@ function ContextView:editPoint(key, title, index)
         description = _("Use as many lines as you like, this stays as one dot point."),
         allow_newline = true, --enter inserts a newline, tap a button to commit
         text_height = Screen:scaleBySize(180),
-        buttons = {{
-            {
-                text = _("Cancel"),
-                id = "close",
-                callback = function()
-                    UIManager:close(dialog)
-                    self:returnToList(key)
-                end,
-            },
-            {
-                text = index and _("Save") or _("Add dot point"),
-                callback = function()
-                    local text = ContextText.trim(dialog:getInputText())
-                    if text == "" then
-                        if index then table.remove(points, index) end -- emptied -> delete it
-                    elseif index then
-                        points[index] = text
-                    else
-                        table.insert(points, text)
-                    end
-                    persist()
-                    UIManager:close(dialog)
-                    self:returnToList(key)
-                end,
-            },
-        }},
+        buttons = rows,
     }
     UIManager:show(dialog)
     dialog:onShowKeyboard()
