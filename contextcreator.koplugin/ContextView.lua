@@ -1,6 +1,6 @@
 --[[
 all of the on device UI, the menus and dialogs for browsing contexts, editing dot
-points, typing nodes, and creating/editing relationships
+points, typing contexts, and creating/editing relationships
 
 built with a ContextStore, it loads/saves through that and never touches the filesystem. 
 pure data operations live in ContextSchema, pure text helpers in ContextText
@@ -69,9 +69,9 @@ local BUILTIN_SECTIONS = {
 --show_counts appends "(N dot points)" to each row. custom-type headers carry _custom_type so the
 --caller can offer to rename them.
 local function groupedContextItems(doc, exclude_key, show_counts)
-    --bucket nodes by type
+    --bucket contexts by type
     local buckets = {}
-    for key, node in pairs(doc.nodes) do
+    for key, node in pairs(doc.contexts) do
         if key ~= exclude_key then
             local t = (node.type == nil or node.type == "") and "unset" or node.type
             buckets[t] = buckets[t] or {}
@@ -128,7 +128,7 @@ local function typeOptions(doc)
         end
     end
     local seen, customs = {}, {}
-    for _key, node in pairs(doc.nodes) do
+    for _key, node in pairs(doc.contexts) do
         if ContextSchema.isCustomType(node.type) and not seen[node.type] then
             seen[node.type] = true
             customs[#customs + 1] = node.type
@@ -155,7 +155,7 @@ end
 --title is the display name to use when the node does not exist yet (brand new from a word)
 function ContextView:openContext(key, title)
     local doc = self.store:load()
-    local node = doc.nodes[key]
+    local node = doc.contexts[key]
     if not node or #node.points == 0 then
         self:editPoint(key, (node and node.title) or title or key, nil)
     else
@@ -163,12 +163,12 @@ function ContextView:openContext(key, title)
     end
 end
 
---existing nodes that are similar (but not an exact match) to the word, best first
+--existing contexts that are similar (but not an exact match) to the word, best first
 --keys are already normalized, so we compare the word's normalized form against them directly
 function ContextView:findSimilarNodes(doc, word)
     local norm = ContextText.normalizeWord(word)
     local matches = {}
-    for key, node in pairs(doc.nodes) do
+    for key, node in pairs(doc.contexts) do
         if key ~= norm then
             local score = ContextText.similarity(norm, key)
             if score >= ContextText.SIMILARITY_THRESHOLD then
@@ -187,7 +187,7 @@ function ContextView:showEntryEditor(word)
     if key == "" then return end
 
     local doc = self.store:load()
-    local node = doc.nodes[key]
+    local node = doc.contexts[key]
     if node then
         --exact match: add a point to it, with the option to redirect to a different context
         self:editPoint(key, node.title, nil, nil, true)
@@ -202,7 +202,7 @@ function ContextView:showEntryEditor(word)
     end
 end
 
---ask the user whether the word belongs to one of the similar existing nodes
+--ask the user whether the word belongs to one of the similar existing contexts
 function ContextView:showSimilarChooser(word, similar)
     local dialog
     local buttons = {}
@@ -239,7 +239,7 @@ end
 --brand new context setup, step 1: confirm/edit the name (prefilled from the highlighted word)
 function ContextView:createNewContext(name)
     --do we already have any contexts? if so we can offer to pick one instead of making a new one
-    local has_existing = next(self.store:load().nodes) ~= nil
+    local has_existing = next(self.store:load().contexts) ~= nil
 
     local dialog
     local rows = {{
@@ -259,7 +259,7 @@ function ContextView:createNewContext(name)
                 if key == "" then return end
                 --if the typed name lands on a context that already exists, add a point to that one
                 local doc = self.store:load()
-                local existing = doc.nodes[key]
+                local existing = doc.contexts[key]
                 if existing then
                     self:editPoint(key, existing.title, nil, nil, true)
                 else
@@ -294,7 +294,7 @@ end
 function ContextView:showExistingContextPicker()
     local doc = self.store:load()
     local items = {}
-    for key, node in pairs(doc.nodes) do
+    for key, node in pairs(doc.contexts) do
         local label = ContextSchema.typeLabel(node.type)
         local text = label ~= "" and T("%1  \u{00B7} %2", node.title, label) or node.title
         table.insert(items, { text = text, _key = key, _title = node.title })
@@ -333,8 +333,8 @@ function ContextView:chooseTypeForNewContext(key, title)
     local function pickType(t)
         if t ~= "unset" then
             local d = self.store:load()
-            if not d.nodes[key] then
-                d.nodes[key] = { title = title, type = t, points = {}, updated = ContextSchema.now() }
+            if not d.contexts[key] then
+                d.contexts[key] = { title = title, type = t, points = {}, updated = ContextSchema.now() }
                 self.store:save(d)
             end
         end
@@ -402,7 +402,7 @@ end
 --the title carries the node's type (when set) so it stays visible while reading the points.
 function ContextView:showPointsList(key)
     local doc = self.store:load()
-    local node = doc.nodes[key]
+    local node = doc.contexts[key]
     if not node then return end
     local points = node.points
 
@@ -468,7 +468,7 @@ function ContextView:showPointActions(menu, key, index)
                 callback = function()
                     UIManager:close(dialog)
                     local doc = self.store:load()
-                    local node = doc.nodes[key]
+                    local node = doc.contexts[key]
                     if node then
                         table.remove(node.points, index)
                         node.updated = ContextSchema.now()
@@ -488,7 +488,7 @@ function ContextView:showPointActions(menu, key, index)
 end
 
 --edit a single dot point, index == nil means we are adding a new one.
---title is the nodes display name, needed when the node does not exist on disk yet.
+--title is the contexts display name, needed when the node does not exist on disk yet.
 --allow_skip adds a "Skip for now" button (only used while creating a brand new context) so the
 --user can initialise the context without writing a point yet.
 --allow_redirect adds an "Add dot point to different context instead" button (used when we landed
@@ -496,7 +496,7 @@ end
 --newlines stay inside the one point, a new point is only made via "Add dot point".
 function ContextView:editPoint(key, title, index, allow_skip, allow_redirect)
     local doc = self.store:load()
-    local node = doc.nodes[key]
+    local node = doc.contexts[key]
     local points = node and node.points or {}
     title = (node and node.title) or title or key
     local existing = index and points[index] or ""
@@ -505,7 +505,7 @@ function ContextView:editPoint(key, title, index, allow_skip, allow_redirect)
     local function ensureNode(node_type)
         if not node then
             node = { title = title, type = node_type or "unset", points = points, updated = ContextSchema.now() }
-            doc.nodes[key] = node
+            doc.contexts[key] = node
         end
         return node
     end
@@ -515,7 +515,7 @@ function ContextView:editPoint(key, title, index, allow_skip, allow_redirect)
             ensureNode()
             node.points = points
             node.updated = ContextSchema.now()
-            doc.tombstones.nodes[key] = nil -- it's alive again, clear any stale deletion mark
+            doc.tombstones.contexts[key] = nil -- it's alive again, clear any stale deletion mark
         elseif node then
             node.updated = ContextSchema.now() -- emptied an existing context, it stays around now
         end
@@ -587,7 +587,7 @@ end
 --after editing, reopen the list if anything remains, otherwise return to reading
 function ContextView:returnToList(key)
     local doc = self.store:load()
-    local node = doc.nodes[key]
+    local node = doc.contexts[key]
     if node and #node.points > 0 then
         self:showPointsList(key)
     end
@@ -599,7 +599,7 @@ end
 function ContextView:showAllContexts()
     local doc = self.store:load()
 
-    if next(doc.nodes) == nil then
+    if next(doc.contexts) == nil then
         UIManager:show(InfoMessage:new{
             text = _("No context entries for this book yet.\n\nLong-press a word while reading and tap \"Add to context\" to start."),
         })
@@ -669,7 +669,7 @@ function ContextView:renameCustomType(old_type, menu)
                     if new_type == old_type then return end
                     local doc = self.store:load()
                     local stamp = ContextSchema.now()
-                    for _key, node in pairs(doc.nodes) do
+                    for _key, node in pairs(doc.contexts) do
                         if node.type == old_type then
                             node.type = new_type
                             node.updated = stamp
@@ -718,7 +718,7 @@ end
 --long press a node: set its type, link it to another node, view its relationships, rename or delete
 function ContextView:showNodeActions(menu, key)
     local doc = self.store:load()
-    local node = doc.nodes[key]
+    local node = doc.contexts[key]
     if not node then return end
 
     local dialog
@@ -778,7 +778,7 @@ end
 --pick the node's type: built-ins, any existing custom types, a "Custom type..." option, or unset
 function ContextView:setNodeType(menu, key)
     local doc = self.store:load()
-    local node = doc.nodes[key]
+    local node = doc.contexts[key]
     local is_unset = not node or node.type == nil or node.type == "" or node.type == "unset"
 
     local dialog
@@ -786,7 +786,7 @@ function ContextView:setNodeType(menu, key)
     --path (which closes the dialog itself before prompting) can reuse it
     local function setType(t)
         local d = self.store:load()
-        local n = d.nodes[key]
+        local n = d.contexts[key]
         if n then
             n.type = t
             n.updated = ContextSchema.now()
@@ -837,7 +837,7 @@ end
 --otherwise the node moves to the new key. the old key is tombstoned either way.
 function ContextView:renameNode(menu, key)
     local doc = self.store:load()
-    local node = doc.nodes[key]
+    local node = doc.contexts[key]
     if not node then return end
 
     local dialog
@@ -865,7 +865,7 @@ function ContextView:renameNode(menu, key)
                         node.title = new_title
                         node.updated = ContextSchema.now()
                     else
-                        local target = doc.nodes[new_key]
+                        local target = doc.contexts[new_key]
                         if target then -- another node already owns this name: merge points in
                             for _, p in ipairs(node.points) do
                                 table.insert(target.points, p)
@@ -874,12 +874,12 @@ function ContextView:renameNode(menu, key)
                         else
                             node.title = new_title
                             node.updated = ContextSchema.now()
-                            doc.nodes[new_key] = node
+                            doc.contexts[new_key] = node
                         end
                         ContextSchema.repointRelationships(doc, key, new_key)
-                        doc.nodes[key] = nil
-                        doc.tombstones.nodes[key] = ContextSchema.now()
-                        doc.tombstones.nodes[new_key] = nil
+                        doc.contexts[key] = nil
+                        doc.tombstones.contexts[key] = ContextSchema.now()
+                        doc.tombstones.contexts[new_key] = nil
                     end
                     self.store:save(doc)
                     UIManager:close(menu)
@@ -1189,7 +1189,7 @@ function ContextView:renameRelationship(rel_id)
     dialog:onShowKeyboard()
 end
 
---edit/add a dot point on a relationship. index == nil adds a new one. mirrors editPoint for nodes.
+--edit/add a dot point on a relationship. index == nil adds a new one. mirrors editPoint for contexts.
 function ContextView:editRelPoint(rel_id, index)
     local doc = self.store:load()
     local rel = ContextSchema.findRel(doc, rel_id)

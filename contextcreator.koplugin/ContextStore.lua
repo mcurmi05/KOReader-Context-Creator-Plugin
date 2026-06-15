@@ -2,7 +2,7 @@
 per book persistence, one json file per book under a "contextcreator" folder
 
 built with the reader ui so it can read the current books title/authors/id, and owns reading
-and writing the v2 document (handing shape/migration off to ContextSchema). the rest of the
+and writing the document (handing shape/migration off to ContextSchema). the rest of the
 plugin only ever talks to load()/save(), it never touches the filesystem directly
 ]]
 
@@ -60,7 +60,7 @@ function ContextStore:getBookAuthors()
     return props.authors or props.author or props.Author or ""
 end
 
---load the v2 document for the current book, migrating an old v1 file in place (in memory) on the way.
+--load the document for the current book.
 --always returns a well-shaped doc, even when the file is missing or unreadable.
 function ContextStore:load()
     local path = self:getBookFilePath()
@@ -80,13 +80,7 @@ function ContextStore:load()
                 logger.warn("ContextCreator: could not parse", path)
             end
         end
-        if data == nil then
-            doc = ContextSchema.newDoc()
-        elseif data.schema == nil then
-            doc = ContextSchema.migrateV1toV2(data) --old flat file
-        else
-            doc = data
-        end
+        doc = data or ContextSchema.newDoc()
     end
 
     ContextSchema.normalize(doc)
@@ -98,8 +92,8 @@ function ContextStore:load()
     return doc
 end
 
---write the v2 document for the current book. file-level updated is bumped so a future sync can
---cheaply tell something changed. an entirely empty doc (no nodes/relationships/tombstones) is removed
+--write the document for the current book. file-level updated is bumped so a future sync can
+--cheaply tell something changed. an entirely empty doc (no contexts/relationships/tombstones) is removed
 function ContextStore:save(doc)
     local path = self:getBookFilePath()
     if ContextSchema.isEmpty(doc) then
@@ -107,6 +101,18 @@ function ContextStore:save(doc)
         return
     end
     doc.updated = ContextSchema.now()
+
+    --tag the array-typed fields so rapidjson serializes them as JSON arrays. without this an empty
+    --array encodes as {} (an object), reloads object-typed, and items appended later get silently
+    --dropped on the next encode (see lua-rapidjson __jsontype handling).
+    doc.relationships = rapidjson.array(doc.relationships)
+    for _, context in pairs(doc.contexts) do
+        context.points = rapidjson.array(context.points)
+    end
+    for _, rel in ipairs(doc.relationships) do
+        rel.points = rapidjson.array(rel.points)
+    end
+
     local ok, encoded = pcall(rapidjson.encode, doc, { pretty = true, sort_keys = true })
     if not ok then
         logger.err("ContextCreator: failed to encode doc:", encoded)
