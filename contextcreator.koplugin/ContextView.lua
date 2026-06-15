@@ -1,0 +1,827 @@
+--[[
+all of the on device UI, the menus and dialogs for browsing contexts, editing dot
+points, typing nodes, and creating/editing relationships
+
+built with a ContextStore, it loads/saves through that and never touches the filesystem. 
+pure data operations live in ContextSchema, pure text helpers in ContextText
+]]
+
+local Button = require("ui/widget/button")
+local ButtonDialog = require("ui/widget/buttondialog")
+local HorizontalSpan = require("ui/widget/horizontalspan")
+local InfoMessage = require("ui/widget/infomessage")
+local InputDialog = require("ui/widget/inputdialog")
+local Menu = require("ui/widget/menu")
+local Size = require("ui/size")
+local UIManager = require("ui/uimanager")
+local Screen = require("device").screen
+local _ = require("gettext")
+local T = require("ffi/util").template
+local ContextText = require("ContextText")
+local ContextSchema = require("ContextSchema")
+
+--bullet shown in front of each dot point in the list view
+local BULLET = "\u{2022} "
+
+--margin kept around the context windows so the book stays visible behind them
+local WINDOW_MARGIN = Screen:scaleBySize(80)
+
+local ContextView = {}
+ContextView.__index = ContextView
+
+function ContextView:new(store)
+    return setmetatable({ store = store }, ContextView)
+end
+
+
+--editing
+
+--open a node: show its dot points, or jump straight to adding one if it is empty/new
+--title is the display name to use when the node does not exist yet (brand new from a word)
+function ContextView:openContext(key, title)
+    local doc = self.store:load()
+    local node = doc.nodes[key]
+    if not node or #node.points == 0 then
+        self:editPoint(key, (node and node.title) or title or key, nil)
+    else
+        self:showPointsList(key)
+    end
+end
+
+--existing nodes that are similar (but not an exact match) to the word, best first
+--keys are already normalized, so we compare the word's normalized form against them directly
+function ContextView:findSimilarNodes(doc, word)
+    local norm = ContextText.normalizeWord(word)
+    local matches = {}
+    for key, node in pairs(doc.nodes) do
+        if key ~= norm then
+            local score = ContextText.similarity(norm, key)
+            if score >= ContextText.SIMILARITY_THRESHOLD then
+                table.insert(matches, { key = key, title = node.title, score = score })
+            end
+        end
+    end
+    table.sort(matches, function(a, b) return a.score > b.score end)
+    return matches
+end
+
+--resolve a highlighted word to a node, then show its dot points.
+--an exact (normalized) match opens straight away; fuzzy look-alikes go through the chooser to confirm.
+function ContextView:showEntryEditor(word)
+    local key = ContextText.normalizeWord(word)
+    if key == "" then return end
+
+    local doc = self.store:load()
+    if doc.nodes[key] then
+        self:openContext(key)
+        return
+    end
+
+    local similar = self:findSimilarNodes(doc, word)
+    if #similar > 0 then
+        self:showSimilarChooser(word, similar)
+    else
+        self:openContext(key, ContextText.trim(word)) -- brand new node, titled after the word
+    end
+end
+
+--ask the user whether the word belongs to one of the similar existing nodes
+function ContextView:showSimilarChooser(word, similar)
+    local dialog
+    local buttons = {}
+    for i = 1, #similar do
+        local m = similar[i]
+        table.insert(buttons, {{
+            text = T(_("Add to \u{201C}%1\u{201D}"), m.title),
+            callback = function()
+                UIManager:close(dialog)
+                self:openContext(m.key)
+            end,
+        }})
+    end
+    table.insert(buttons, {{
+        text = T(_("No, create \u{201C}%1\u{201D}"), ContextText.trim(word)),
+        callback = function()
+            UIManager:close(dialog)
+            self:openContext(ContextText.normalizeWord(word), ContextText.trim(word))
+        end,
+    }})
+    table.insert(buttons, {{
+        text = _("Cancel"),
+        callback = function() UIManager:close(dialog) end,
+    }})
+
+    dialog = ButtonDialog:new{
+        title = T(_("\u{201C}%1\u{201D} looks similar to existing contexts. Add to one of them?"), ContextText.trim(word)),
+        title_align = "center",
+        buttons = buttons,
+    }
+    UIManager:show(dialog)
+end
+
+--insert a borderless text button next to a Menus bottom pagenavigation bar.
+--side == "left" puts it before the chevrons, "right" puts it after them.
+--(menu.page_info is the HorizontalGroup holding the page-turn chevrons and "Page x of y")
+function ContextView:addFooterButton(menu, side, text, callback)
+    local button = Button:new{
+        text = text,
+        bordersize = 0,
+        show_parent = menu,
+        callback = callback,
+    }
+    local span = HorizontalSpan:new{ width = Size.span.horizontal_default }
+    if side == "left" then
+        table.insert(menu.page_info, 1, span)
+        table.insert(menu.page_info, 1, button)
+    else
+        table.insert(menu.page_info, span)
+        table.insert(menu.page_info, button)
+    end
+    menu.page_info:resetLayout() --recompute positions/size so the bar re-centers with the new buttons
+end
+
+--show the dot points for a node as a list. tap to add/edit, long-press to delete.
+--the title carries the node's type (when set) so it stays visible while reading the points.
+function ContextView:showPointsList(key)
+    local doc = self.store:load()
+    local node = doc.nodes[key]
+    if not node then return end
+    local points = node.points
+
+    local items = {}
+    for i, point in ipairs(points) do
+        table.insert(items, {
+            text = BULLET .. point:gsub("%s*\n%s*", " "), --collapse multi line points to one line for the list
+            _index = i,
+        })
+    end
+
+    local label = ContextSchema.typeLabel(node.type)
+    local title = label ~= "" and T(_("%1  \u{00B7} %2"), node.title, label) or node.title
+
+    local menu
+    menu = Menu:new{
+        title = title,
+        item_table = items,
+        width = Screen:getWidth() - 2 * WINDOW_MARGIN,
+        height = Screen:getHeight() - 2 * WINDOW_MARGIN,
+        is_popout = false, --keep the border but drop Menus rounded corners
+        onMenuSelect = function(_self, item)
+            UIManager:close(menu)
+            self:editPoint(key, node.title, item._index)
+        end,
+        onMenuHold = function(_self, item)
+            self:showPointActions(menu, key, item._index)
+            return true
+        end,
+        close_callback = function()
+            UIManager:close(menu)
+        end,
+    }
+
+    --flank the bottom page-navigation bar: "All contexts" on its left, "Add dot point" on its right
+    self:addFooterButton(menu, "left", _("\u{2190} All contexts"), function()
+        UIManager:close(menu)
+        self:showAllContexts()
+    end)
+    self:addFooterButton(menu, "right", _("\u{FF0B} Add dot point"), function()
+        UIManager:close(menu)
+        self:editPoint(key, node.title, nil)
+    end)
+
+    UIManager:show(menu, nil, nil, WINDOW_MARGIN, WINDOW_MARGIN)
+end
+
+--long-press a dot point, offer to delete it
+function ContextView:showPointActions(menu, key, index)
+    local dialog
+    dialog = ButtonDialog:new{
+        title = _("Delete this dot point?"),
+        title_align = "center",
+        buttons = {
+            {{
+                text = _("Delete"),
+                callback = function()
+                    UIManager:close(dialog)
+                    local doc = self.store:load()
+                    local node = doc.nodes[key]
+                    if node then
+                        table.remove(node.points, index)
+                        node.updated = ContextSchema.now()
+                        ContextSchema.pruneNodeIfEmpty(doc, key)
+                        self.store:save(doc)
+                    end
+                    UIManager:close(menu)
+                    self:returnToList(key)
+                end,
+            }},
+            {{
+                text = _("Cancel"),
+                callback = function() UIManager:close(dialog) end,
+            }},
+        },
+    }
+    UIManager:show(dialog)
+end
+
+--edit a single dot point, index == nil means we are adding a new one.
+--title is the nodes display name, needed when the node does not exist on disk yet.
+--newlines stay inside the one point, a new point is only made via "Add dot point".
+function ContextView:editPoint(key, title, index)
+    local doc = self.store:load()
+    local node = doc.nodes[key]
+    local points = node and node.points or {}
+    title = (node and node.title) or title or key
+    local existing = index and points[index] or ""
+
+    local function persist()
+        if #points > 0 then
+            if not node then
+                node = { title = title, type = "unset", points = points, updated = ContextSchema.now() }
+                doc.nodes[key] = node
+            else
+                node.points = points
+            end
+            node.updated = ContextSchema.now()
+            doc.tombstones.nodes[key] = nil -- it's alive again, clear any stale deletion mark
+        elseif node then
+            node.updated = ContextSchema.now()
+        end
+        ContextSchema.pruneNodeIfEmpty(doc, key) -- a now-empty, untyped, unlinked node disappears
+        self.store:save(doc)
+    end
+
+    local dialog
+    dialog = InputDialog:new{
+        title = index and T(_("Edit dot point for \u{201C}%1\u{201D} context"), title) or T(_("New dot point for \u{201C}%1\u{201D} context"), title),
+        input = existing,
+        input_hint = _("Type your dot point..."),
+        description = _("Use as many lines as you like, this stays as one dot point."),
+        allow_newline = true, --enter inserts a newline, tap a button to commit
+        text_height = Screen:scaleBySize(180),
+        buttons = {{
+            {
+                text = _("Cancel"),
+                id = "close",
+                callback = function()
+                    UIManager:close(dialog)
+                    self:returnToList(key)
+                end,
+            },
+            {
+                text = index and _("Save") or _("Add dot point"),
+                callback = function()
+                    local text = ContextText.trim(dialog:getInputText())
+                    if text == "" then
+                        if index then table.remove(points, index) end -- emptied -> delete it
+                    elseif index then
+                        points[index] = text
+                    else
+                        table.insert(points, text)
+                    end
+                    persist()
+                    UIManager:close(dialog)
+                    self:returnToList(key)
+                end,
+            },
+        }},
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+--after editing, reopen the list if anything remains, otherwise return to reading
+function ContextView:returnToList(key)
+    local doc = self.store:load()
+    local node = doc.nodes[key]
+    if node and #node.points > 0 then
+        self:showPointsList(key)
+    end
+end
+
+
+--viewing contexts for a book
+
+function ContextView:showAllContexts()
+    local doc = self.store:load()
+    local items = {}
+    for key, node in pairs(doc.nodes) do
+        local label = ContextSchema.typeLabel(node.type)
+        local text = label ~= ""
+            and T("%1  \u{00B7} %2  (%3)", node.title, label, #node.points)
+            or T("%1  (%2)", node.title, #node.points)
+        table.insert(items, { text = text, _key = key, _title = node.title })
+    end
+
+    if #items == 0 then
+        UIManager:show(InfoMessage:new{
+            text = _("No context entries for this book yet.\n\nLong-press a word while reading and tap \"Add to context\" to start."),
+        })
+        return
+    end
+
+    table.sort(items, function(a, b) return a._title:lower() < b._title:lower() end)
+
+    local menu
+    menu = Menu:new{
+        title = T(_("Contexts: %1"), self.store:getBookTitle()),
+        item_table = items,
+        width = Screen:getWidth() - 2 * WINDOW_MARGIN,
+        height = Screen:getHeight() - 2 * WINDOW_MARGIN,
+        is_popout = false, --keep the border but drop Menus rounded corners
+        onMenuSelect = function(_self, item)
+            UIManager:close(menu)
+            self:openContext(item._key)
+        end,
+        onMenuHold = function(_self, item)
+            self:showNodeActions(menu, item._key)
+            return true
+        end,
+        close_callback = function()
+            UIManager:close(menu)
+        end,
+    }
+
+    --a "Relationships" shortcut on the bottom bar once any links exist, opening the book-wide list
+    if #doc.relationships > 0 then
+        self:addFooterButton(menu, "right", T(_("\u{2194} Relationships (%1)"), #doc.relationships), function()
+            UIManager:close(menu)
+            self:showRelationships(nil)
+        end)
+    end
+
+    UIManager:show(menu, nil, nil, WINDOW_MARGIN, WINDOW_MARGIN)
+end
+
+--long press a node: set its type, link it to another node, view its relationships, rename or delete
+function ContextView:showNodeActions(menu, key)
+    local doc = self.store:load()
+    local node = doc.nodes[key]
+    if not node then return end
+
+    local dialog
+    dialog = ButtonDialog:new{
+        title = node.title,
+        title_align = "center",
+        buttons = {
+            {{
+                text = T(_("Set type (%1)"), ContextSchema.typeLabel(node.type) ~= "" and ContextSchema.typeLabel(node.type) or _("unset")),
+                callback = function()
+                    UIManager:close(dialog)
+                    self:setNodeType(menu, key)
+                end,
+            }},
+            {{
+                text = _("Link to\u{2026}"),
+                callback = function()
+                    UIManager:close(dialog)
+                    self:showLinkPicker(menu, key)
+                end,
+            }},
+            {{
+                text = _("Relationships"),
+                callback = function()
+                    UIManager:close(dialog)
+                    UIManager:close(menu)
+                    self:showRelationships(key)
+                end,
+            }},
+            {{
+                text = _("Edit name"),
+                callback = function()
+                    UIManager:close(dialog)
+                    self:renameNode(menu, key)
+                end,
+            }},
+            {{
+                text = _("Delete"),
+                callback = function()
+                    UIManager:close(dialog)
+                    local d = self.store:load()
+                    ContextSchema.deleteNode(d, key)
+                    self.store:save(d)
+                    UIManager:close(menu)
+                    self:showAllContexts()
+                end,
+            }},
+            {{
+                text = _("Cancel"),
+                callback = function() UIManager:close(dialog) end,
+            }},
+        },
+    }
+    UIManager:show(dialog)
+end
+
+--pick the node's type (character / place / object / concept / unset)
+function ContextView:setNodeType(menu, key)
+    local dialog
+    local buttons = {}
+    for i = 1, #ContextSchema.NODE_TYPES do
+        local t = ContextSchema.NODE_TYPES[i]
+        table.insert(buttons, {{
+            text = t == "unset" and _("Unset") or ContextSchema.typeLabel(t),
+            callback = function()
+                UIManager:close(dialog)
+                local doc = self.store:load()
+                local node = doc.nodes[key]
+                if node then
+                    node.type = t
+                    node.updated = ContextSchema.now()
+                    self.store:save(doc)
+                end
+                UIManager:close(menu)
+                self:showAllContexts()
+            end,
+        }})
+    end
+    table.insert(buttons, {{
+        text = _("Cancel"),
+        callback = function() UIManager:close(dialog) end,
+    }})
+
+    dialog = ButtonDialog:new{
+        title = _("What kind of thing is this?"),
+        title_align = "center",
+        buttons = buttons,
+    }
+    UIManager:show(dialog)
+end
+
+--rename a node. if the new name normalizes onto an existing node, merge into it (and repoint links);
+--otherwise the node moves to the new key. the old key is tombstoned either way.
+function ContextView:renameNode(menu, key)
+    local doc = self.store:load()
+    local node = doc.nodes[key]
+    if not node then return end
+
+    local dialog
+    dialog = InputDialog:new{
+        title = _("Rename context"),
+        input = node.title,
+        buttons = {{
+            {
+                text = _("Cancel"),
+                id = "close",
+                callback = function() UIManager:close(dialog) end,
+            },
+            {
+                text = _("Save"),
+                is_enter_default = true,
+                callback = function()
+                    local new_title = ContextText.trim(dialog:getInputText())
+                    UIManager:close(dialog)
+                    if new_title == "" or new_title == node.title then return end
+                    local new_key = ContextText.normalizeWord(new_title)
+                    if new_key == "" then return end
+
+                    if new_key == key then
+                        --same identity, just a display-name tweak
+                        node.title = new_title
+                        node.updated = ContextSchema.now()
+                    else
+                        local target = doc.nodes[new_key]
+                        if target then -- another node already owns this name: merge points in
+                            for _, p in ipairs(node.points) do
+                                table.insert(target.points, p)
+                            end
+                            target.updated = ContextSchema.now()
+                        else
+                            node.title = new_title
+                            node.updated = ContextSchema.now()
+                            doc.nodes[new_key] = node
+                        end
+                        ContextSchema.repointRelationships(doc, key, new_key)
+                        doc.nodes[key] = nil
+                        doc.tombstones.nodes[key] = ContextSchema.now()
+                        doc.tombstones.nodes[new_key] = nil
+                    end
+                    self.store:save(doc)
+                    UIManager:close(menu)
+                    self:showAllContexts()
+                end,
+            },
+        }},
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+
+--relationships
+
+--pick another node to link this one to, then ask for the relationship's label
+function ContextView:showLinkPicker(menu, from_key)
+    local doc = self.store:load()
+    local items = {}
+    for key, node in pairs(doc.nodes) do
+        if key ~= from_key then
+            table.insert(items, { text = node.title, _key = key })
+        end
+    end
+
+    if #items == 0 then
+        UIManager:show(InfoMessage:new{
+            text = _("There is no other context to link to yet.\n\nAdd another context first, then link them."),
+        })
+        return
+    end
+
+    table.sort(items, function(a, b) return a.text:lower() < b.text:lower() end)
+
+    local picker
+    picker = Menu:new{
+        title = T(_("Link \u{201C}%1\u{201D} to\u{2026}"), ContextSchema.titleForKey(doc, from_key)),
+        item_table = items,
+        width = Screen:getWidth() - 2 * WINDOW_MARGIN,
+        height = Screen:getHeight() - 2 * WINDOW_MARGIN,
+        is_popout = false,
+        onMenuSelect = function(_self, item)
+            UIManager:close(picker)
+            self:editRelationshipLabel(menu, from_key, item._key)
+        end,
+        close_callback = function() UIManager:close(picker) end,
+    }
+    UIManager:show(picker, nil, nil, WINDOW_MARGIN, WINDOW_MARGIN)
+end
+
+--name the link (e.g. "married to", "lives in") and create it. afterwards open it so dot points can be added.
+function ContextView:editRelationshipLabel(menu, from_key, to_key)
+    local doc = self.store:load()
+    local dialog
+    dialog = InputDialog:new{
+        title = T(_("How are they related?\n%1 \u{2192} %2"), ContextSchema.titleForKey(doc, from_key), ContextSchema.titleForKey(doc, to_key)),
+        input = "",
+        input_hint = _("e.g. married to, lives in, owns\u{2026}"),
+        buttons = {{
+            {
+                text = _("Cancel"),
+                id = "close",
+                callback = function() UIManager:close(dialog) end,
+            },
+            {
+                text = _("Create link"),
+                is_enter_default = true,
+                callback = function()
+                    local label = ContextText.trim(dialog:getInputText())
+                    UIManager:close(dialog)
+                    if label == "" then return end
+                    local rel = {
+                        id = ContextSchema.genId(),
+                        from = from_key,
+                        to = to_key,
+                        label = label,
+                        points = {},
+                        updated = ContextSchema.now(),
+                    }
+                    table.insert(doc.relationships, rel)
+                    self.store:save(doc)
+                    if menu then UIManager:close(menu) end
+                    self:showRelationshipView(rel.id) -- jump in so the user can add context to the link
+                end,
+            },
+        }},
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+--list relationships. key == nil lists every link in the book; otherwise only those touching that node.
+function ContextView:showRelationships(key)
+    local doc = self.store:load()
+    local items = {}
+    for _, rel in ipairs(doc.relationships) do
+        if key == nil or rel.from == key or rel.to == key then
+            table.insert(items, {
+                text = T("%1  \u{2192}  %2  (%3)", ContextSchema.titleForKey(doc, rel.from),
+                    ContextSchema.titleForKey(doc, rel.to), rel.label),
+                _id = rel.id,
+            })
+        end
+    end
+
+    if #items == 0 then
+        UIManager:show(InfoMessage:new{
+            text = key and _("No relationships for this context yet.\n\nLong-press it and choose \"Link to\u{2026}\" to add one.")
+                or _("No relationships in this book yet.\n\nLong-press a context and choose \"Link to\u{2026}\" to add one."),
+        })
+        return
+    end
+
+    table.sort(items, function(a, b) return a.text:lower() < b.text:lower() end)
+
+    local title = key and T(_("Relationships: %1"), ContextSchema.titleForKey(doc, key)) or _("All relationships")
+    local menu
+    menu = Menu:new{
+        title = title,
+        item_table = items,
+        width = Screen:getWidth() - 2 * WINDOW_MARGIN,
+        height = Screen:getHeight() - 2 * WINDOW_MARGIN,
+        is_popout = false,
+        onMenuSelect = function(_self, item)
+            UIManager:close(menu)
+            self:showRelationshipView(item._id)
+        end,
+        onMenuHold = function(_self, item)
+            self:showRelationshipActions(menu, item._id, key)
+            return true
+        end,
+        close_callback = function() UIManager:close(menu) end,
+    }
+    UIManager:show(menu, nil, nil, WINDOW_MARGIN, WINDOW_MARGIN)
+end
+
+--a single relationship: its dot points, with footer buttons to rename the link or add a point.
+--tap a point to edit it, long-press to delete it (mirrors the node points list).
+function ContextView:showRelationshipView(rel_id)
+    local doc = self.store:load()
+    local rel = ContextSchema.findRel(doc, rel_id)
+    if not rel then return end
+
+    local items = {}
+    for i, point in ipairs(rel.points) do
+        table.insert(items, {
+            text = BULLET .. point:gsub("%s*\n%s*", " "),
+            _index = i,
+        })
+    end
+
+    local menu
+    menu = Menu:new{
+        title = T(_("%1  \u{2192}  %2  (%3)"), ContextSchema.titleForKey(doc, rel.from), ContextSchema.titleForKey(doc, rel.to), rel.label),
+        item_table = items,
+        width = Screen:getWidth() - 2 * WINDOW_MARGIN,
+        height = Screen:getHeight() - 2 * WINDOW_MARGIN,
+        is_popout = false,
+        onMenuSelect = function(_self, item)
+            UIManager:close(menu)
+            self:editRelPoint(rel_id, item._index)
+        end,
+        onMenuHold = function(_self, item)
+            self:showRelPointActions(menu, rel_id, item._index)
+            return true
+        end,
+        close_callback = function() UIManager:close(menu) end,
+    }
+
+    self:addFooterButton(menu, "left", _("\u{270E} Edit label"), function()
+        UIManager:close(menu)
+        self:renameRelationship(rel_id)
+    end)
+    self:addFooterButton(menu, "right", _("\u{FF0B} Add dot point"), function()
+        UIManager:close(menu)
+        self:editRelPoint(rel_id, nil)
+    end)
+
+    UIManager:show(menu, nil, nil, WINDOW_MARGIN, WINDOW_MARGIN)
+end
+
+--long-press a relationship in the list: delete it (tombstoned for sync)
+function ContextView:showRelationshipActions(menu, rel_id, list_key)
+    local dialog
+    dialog = ButtonDialog:new{
+        title = _("Delete this relationship?"),
+        title_align = "center",
+        buttons = {
+            {{
+                text = _("Delete"),
+                callback = function()
+                    UIManager:close(dialog)
+                    local doc = self.store:load()
+                    local _, idx = ContextSchema.findRel(doc, rel_id)
+                    if idx then
+                        doc.tombstones.relationships[rel_id] = ContextSchema.now()
+                        table.remove(doc.relationships, idx)
+                        self.store:save(doc)
+                    end
+                    UIManager:close(menu)
+                    self:showRelationships(list_key)
+                end,
+            }},
+            {{
+                text = _("Cancel"),
+                callback = function() UIManager:close(dialog) end,
+            }},
+        },
+    }
+    UIManager:show(dialog)
+end
+
+--rename the relationship's label
+function ContextView:renameRelationship(rel_id)
+    local doc = self.store:load()
+    local rel = ContextSchema.findRel(doc, rel_id)
+    if not rel then return end
+
+    local dialog
+    dialog = InputDialog:new{
+        title = _("Edit relationship label"),
+        input = rel.label,
+        buttons = {{
+            {
+                text = _("Cancel"),
+                id = "close",
+                callback = function()
+                    UIManager:close(dialog)
+                    self:showRelationshipView(rel_id)
+                end,
+            },
+            {
+                text = _("Save"),
+                is_enter_default = true,
+                callback = function()
+                    local label = ContextText.trim(dialog:getInputText())
+                    UIManager:close(dialog)
+                    if label ~= "" then
+                        rel.label = label
+                        rel.updated = ContextSchema.now()
+                        self.store:save(doc)
+                    end
+                    self:showRelationshipView(rel_id)
+                end,
+            },
+        }},
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+--edit/add a dot point on a relationship. index == nil adds a new one. mirrors editPoint for nodes.
+function ContextView:editRelPoint(rel_id, index)
+    local doc = self.store:load()
+    local rel = ContextSchema.findRel(doc, rel_id)
+    if not rel then return end
+    local existing = index and rel.points[index] or ""
+
+    local dialog
+    dialog = InputDialog:new{
+        title = index and T(_("Edit dot point for \u{201C}%1\u{201D}"), rel.label) or T(_("New dot point for \u{201C}%1\u{201D}"), rel.label),
+        input = existing,
+        input_hint = _("Type your dot point..."),
+        description = _("Use as many lines as you like, this stays as one dot point."),
+        allow_newline = true,
+        text_height = Screen:scaleBySize(180),
+        buttons = {{
+            {
+                text = _("Cancel"),
+                id = "close",
+                callback = function()
+                    UIManager:close(dialog)
+                    self:showRelationshipView(rel_id)
+                end,
+            },
+            {
+                text = index and _("Save") or _("Add dot point"),
+                callback = function()
+                    local text = ContextText.trim(dialog:getInputText())
+                    if text == "" then
+                        if index then table.remove(rel.points, index) end
+                    elseif index then
+                        rel.points[index] = text
+                    else
+                        table.insert(rel.points, text)
+                    end
+                    rel.updated = ContextSchema.now()
+                    self.store:save(doc)
+                    UIManager:close(dialog)
+                    self:showRelationshipView(rel_id)
+                end,
+            },
+        }},
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+--long-press a relationship dot point, offer to delete it
+function ContextView:showRelPointActions(menu, rel_id, index)
+    local dialog
+    dialog = ButtonDialog:new{
+        title = _("Delete this dot point?"),
+        title_align = "center",
+        buttons = {
+            {{
+                text = _("Delete"),
+                callback = function()
+                    UIManager:close(dialog)
+                    local doc = self.store:load()
+                    local rel = ContextSchema.findRel(doc, rel_id)
+                    if rel then
+                        table.remove(rel.points, index)
+                        rel.updated = ContextSchema.now()
+                        self.store:save(doc)
+                    end
+                    UIManager:close(menu)
+                    self:showRelationshipView(rel_id)
+                end,
+            }},
+            {{
+                text = _("Cancel"),
+                callback = function() UIManager:close(dialog) end,
+            }},
+        },
+    }
+    UIManager:show(dialog)
+end
+
+return ContextView

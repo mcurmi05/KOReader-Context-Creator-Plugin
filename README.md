@@ -12,13 +12,13 @@ Will be first time writing Lua, have a little bit of experience with Koreader pl
 
 ## Dev setup (mac)
 
-The plugin is symlinked into KOReader's user plugin dir so edits are live, no copying:
+Run `./dev.sh` from the repo root to install the plugin into your local KOReader, it copies `contextcreator.koplugin` into KOReader's user plugin dir, replacing whatever's there:
 
 ```sh
-ln -sfn "$PWD/contextcreator.koplugin" "$HOME/Library/Application Support/koreader/plugins/contextcreator.koplugin"
+./dev.sh
 ```
 
-Then run `./dev.sh` from the repo root to launch the installed `/Applications/KOReader.app` from the terminal so plugin logs and crashes print to stdout. Edit the repo, quit KOReader, re-run `./dev.sh` to reload (plugins only load at startup). Use `KO_DEBUG=1 ./dev.sh` for verbose logging, or `./dev.sh path/to/book.epub` to open straight into a book.
+Then launch KOReader (it only loads plugins at startup). The loop is: edit the repo, run `./dev.sh`, restart KOReader. To see plugin logs and crashes, start KOReader from a terminal with `/Applications/KOReader.app/Contents/MacOS/koreader` (add `-d` for verbose logging).
 
 
 ## Implementation Plan: sync server + graph web frontend
